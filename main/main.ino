@@ -1,10 +1,5 @@
 #include <MD_YX5300.h>
-
 #include <Adafruit_NeoPixel.h>
-
-#include <pcmConfig.h>
-#include <pcmRF.h>
-#include <TMRpcm.h>
 
 #include "I2Cdev.h"
 #include "MPU6050.h"
@@ -15,26 +10,30 @@
 #include "Wire.h"
 #endif
 
+#define USE_SOFTWARESERIAL 1
+
 //Control
 bool saberOn = false;
+bool lightOn = true;
 
 //Accelerometer
 MPU6050 accelgyro;
 int16_t ax, ay, az;
 int16_t gx, gy, gz;
-int16_t oldAx, oldAy, oldAz;
-
-const int SWING_THRESHOLD = 3000;
-const int CLASH_THRESHOLD = 5000;
+int xOld, yOld, zOld; 
+const int SWING_THRESHOLD = 9000;
+const int CLASH_THRESHOLD = 11000;
 const int CLASH_LOOP_COUNT = 3;
-
 int clashLoopCount = 0;
-
+int zerosCount = 0;
+int maxZerosLimit = 10;
+int baseline = 0;
 #define BAUD_RATE 9600
+
 //Lights
-#define LIGHT_PIN 9
+#define LIGHT_PIN 11
 #define NUM_LIGHTS 7
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LIGHTS, LIGHT_PIN, NEO_GRB);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LIGHTS, LIGHT_PIN, NEO_GRB + NEO_KHZ800);
 uint32_t black = strip.Color(0, 0, 0);
 uint32_t blue = strip.Color(50, 50, 200);
 uint32_t light_blue = strip.Color(50, 50, 150);
@@ -55,8 +54,8 @@ uint8_t  TRACK_SABER_CLASH_B = 7;
 uint8_t  TRACK_SABER_OFF = 8;
 uint8_t  EQUALIZER_MODE = 5;
 uint8_t  VOLUME = 30;
-#define ARDUINO_RX 0//should connect to TX of the Serial MP3 Player module
-#define ARDUINO_TX 1//connect to RX of the module
+#define ARDUINO_RX 7//should connect to TX of the Serial MP3 Player module
+#define ARDUINO_TX 5//connect to RX of the module
 MD_YX5300 mp3(ARDUINO_RX, ARDUINO_TX);
 boolean audioPlaying = false;
 uint8_t trackQueue = 0;
@@ -64,29 +63,37 @@ int trackDelay = 3;
 int lastPlayedCount = 0;
 boolean mandatoryTrackPlaying = false;
 int audioPlayingCount = 0;
-int audioPlayingLimit = 500;
+int audioPlayingLimit = 50;
+int timeBetweenSwings = 50;
+int lastSwingTime = 0;
+int maxDifference = 0;
+boolean lastSoundSwing = false;
 
 //Buttons
-const int  buttonPin = 2;
+const int  buttonPin = 3;
 int buttonState = 0;         // current state of the button
 int lastButtonState = 0;     // previous state of the button
 
 //************************Lights***************************//
 void initializeLights()
 {
+  Serial.print("Initializing Lights...");
   strip.begin();
+  strip.setBrightness(255);
   strip.show();
+  Serial.println("Lights Initialized");
 }
 
 void checkLights()
 {
-  if (light_loop == 20) {
+  Serial.println("   Checking Lights");
+  if (light_loop == 1) {
     setPixels(0, blue);
   }
 
   light_loop = light_loop + 1;
 
-  if (light_loop == 860) {
+  if (light_loop == 4) {
     setPixels(0, light_blue);
     light_loop = 0;
   }
@@ -94,7 +101,7 @@ void checkLights()
 
 void setPixels(int wait, uint32_t color)
 {
-
+  Serial.println("      Setting Lights");
   for (int i = 0; i < NUM_LIGHTS; i++)
   {
     strip.setPixelColor(i, color);
@@ -109,7 +116,7 @@ void setPixels(int wait, uint32_t color)
 
 void setPixelsReverse(int wait, uint32_t color)
 {
-
+  Serial.println("      Setting Lights Reverse");
   for (int i = NUM_LIGHTS; i >= 0; i--)
   {
     strip.setPixelColor(i, color);
@@ -126,12 +133,14 @@ void setPixelsReverse(int wait, uint32_t color)
 
 void initializeAudio()
 {
+  Serial.print("\nInitializing Audio...");
   mp3.begin();
   mp3.setTimeout(1000);
   mp3.setCallback(cbResponse);
   mp3.setSynchronous(false);
   mp3.equalizer(EQUALIZER_MODE);
   mp3.volume(VOLUME);
+  Serial.println("\nAudio Initialized.");
 }
 
 void cbResponse(const MD_YX5300::cbData *status)
@@ -149,15 +158,17 @@ void cbResponse(const MD_YX5300::cbData *status)
 }
 
 void checkAudio(boolean override) {
-
+  Serial.println("   Checking Audio");
   audioPlayingCount++;
 
+  //If this is over, we can start a new track
   if(audioPlayingCount > audioPlayingLimit){
     mandatoryTrackPlaying = false;
   }
 
   if (override && !mandatoryTrackPlaying) {
-    Serial.println("\nPlaying Track" + trackQueue);
+    Serial.print("\nPlaying Track ");
+    Serial.println(trackQueue);
     mp3.playSpecific(FOLDER, trackQueue);
     trackQueue = 0;
     Serial.println("\naudioPlaying = true");
@@ -176,52 +187,114 @@ void playAudio(uint8_t track) {
 //************************Gyro***************************//
 void initializeGyro()
 {
-  // join I2C bus (I2Cdev library doesn't do this automatically)
-#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+  Serial.print("\nInitializing Gyro...");
   Wire.begin();
-#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-  Fastwire::setup(400, true);
-#endif
-
-  Serial.begin(BAUD_RATE);
   accelgyro.initialize();
+  accelgyro.CalibrateAccel(6);
+  accelgyro.CalibrateGyro(6);
+
+  for(int x = 0; x < 5; x++){
+    Serial.print("*");
+    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    xOld = abs(ax);
+    yOld = abs(ay);
+    zOld = abs(az);
+  }
+  
+  Serial.println("Gyro Initialized");
 }
 
 void checkMovement()
 {
+  Serial.println("   Checking Movement");
   accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  if ( clashLoopCount >= CLASH_LOOP_COUNT)
-  {
-    if ( abs(ax) - oldAx > CLASH_THRESHOLD ||  abs(ay) - oldAy > CLASH_THRESHOLD || abs(az) - oldAz > CLASH_THRESHOLD )
+   Serial.print("      Old Values: ");
+   Serial.print(xOld);
+   Serial.print(", ");
+   Serial.print(yOld);
+   Serial.print(", ");
+   Serial.println(zOld);
+   Serial.print("      New Values: ");
+   Serial.print(ax);
+   Serial.print(", ");
+   Serial.print(ay);
+   Serial.print(", ");
+   Serial.println(az);
+   Serial.print("      Difference: ");
+   Serial.print(abs(abs(ax) - xOld));
+   Serial.print(", ");
+   Serial.print(abs(abs(ay) - yOld));
+   Serial.print(", ");
+   Serial.println(abs(abs(az) - zOld));
+   
+
+  if(zerosCount < maxZerosLimit){
+    accelgyro.initialize();
+  }
+
+  //We're not getting values, return.
+  if( ax == 0 && ay == 0 & az == 0){
+    zerosCount = zerosCount + 1;
+    return;
+  }
+
+  if(saberOn){
+    if ( clashLoopCount >= CLASH_LOOP_COUNT)
     {
-      clash();
+      if ( abs(abs(ax) - xOld) > CLASH_THRESHOLD ||  abs(abs(ay) - yOld) > CLASH_THRESHOLD || abs(abs(az) - zOld) > CLASH_THRESHOLD )
+      {
+        clash();
+        Serial.println("      Clash Detected!");
+      }
+  
+      clashLoopCount = 0;
     }
 
-    oldAx = abs(ax);
-    oldAy = abs(ay);
-    oldAz = abs(az);
-
-    clashLoopCount = 0;
+    if(lastSwingTime > timeBetweenSwings || lastSwingTime ==
+    0){
+      if ( abs(abs(ax) - xOld) > SWING_THRESHOLD ||  abs(abs(ay) - yOld) > SWING_THRESHOLD || abs(abs(az) - zOld) > SWING_THRESHOLD )
+      {
+        swing();
+        Serial.println("      Swing Detected");
+      }
+    }
+    clashLoopCount = clashLoopCount + 1;
+    lastSwingTime = lastSwingTime + 1;
   }
 
-  if ( abs(ax) - oldAx > SWING_THRESHOLD ||  abs(ay) - oldAy > SWING_THRESHOLD || abs(az) - oldAz > SWING_THRESHOLD )
-  {
-
-    swing();
+  if(abs(abs(ax) - xOld) > maxDifference){
+    maxDifference = abs(abs(ax) - xOld);
   }
 
-  clashLoopCount = clashLoopCount + 1;
+  if(abs(abs(ay) - yOld) > maxDifference){
+    maxDifference = abs(abs(ay) - yOld);
+  }
+
+  if(abs(abs(az) - zOld) > maxDifference){
+    maxDifference = abs(abs(az) - zOld);
+  }
+
+  Serial.print("      Max Difference:  ");
+  Serial.println(maxDifference);
+  
+  xOld = abs(ax);
+  yOld = abs(ay);
+  zOld = abs(az);
 }
 
 //Buttons
 void checkForButtonPush() {
+  Serial.println("\n   Checking Button State");
+  
   buttonState  = digitalRead(buttonPin);
+
   // compare the buttonState to its previous state
   if (buttonState != lastButtonState) {
     // if the state has changed, increment the counter
     if (buttonState == HIGH) {
       // if the current state is HIGH then the button went from off to on:
+      Serial.println("      Button Pushed");
       saberOn = !saberOn;
 
       if (saberOn) {
@@ -229,7 +302,6 @@ void checkForButtonPush() {
       } else {
         powerOff();
       }
-
     }
   }
   // save the current state as the last state, for next time through the loop
@@ -244,11 +316,11 @@ void clash()
 
   if (randomNumber > 15) {
     playAudio(TRACK_SABER_CLASH_A);
-    Serial.println("\nCLASH SOUNDS!  RAWWWW!\n");
+    Serial.println("\n   CLASH SOUNDS!  RAWWWW!\n");
     setPixels(0, white);
   } else {
     playAudio(TRACK_SABER_CLASH_B);
-    Serial.println("\nCLASH SOUNDS!  BRRRREEE!\n");
+    Serial.println("\n   CLASH SOUNDS!  BRRRREEE!\n");
     setPixels(0, white_blue);
   }
   light_loop = 0;
@@ -258,19 +330,20 @@ void clash()
 
 void swing()
 {
-  Serial.println("\nSWIIIIING!\n");
+  Serial.println("\n   SWIIIIING!\n");
 
   long randomNumber = random(10, 20);
 
   if (randomNumber > 15) {
     playAudio(TRACK_SABER_SWING_A);
-    Serial.println("\nCLASH SOUNDS!  RAWWWW!\n");
+    Serial.println("\n   CLASH SOUNDS!  RAWWWW!\n");
     setPixels(0, white);
   } else {
     playAudio(TRACK_SABER_SWING_B);
-    Serial.println("\nCLASH SOUNDS!  BRRRREEE!\n");
+    Serial.println("\n   CLASH SOUNDS!  BRRRREEE!\n");
     setPixels(0, white_blue);
   }
+  lastSwingTime = 0;
   light_loop = 0;
   checkAudio(true);
   mandatoryTrackPlaying = true;
@@ -299,6 +372,13 @@ void powerOff() {
 
 void setup()
 {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+  delay(250);                       // wait for a second
+  digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
+  delay(250);
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+  
   Serial.begin(BAUD_RATE);
   Serial.println("\nBooting Up...");
 
@@ -310,18 +390,29 @@ void setup()
 
   //Get the On/Off button ready
   pinMode(buttonPin, INPUT);
-
+  digitalRead(buttonPin);
   //Setup the audio
   initializeAudio();
 }
 
 void loop()
 {
+  Serial.println("Loop Started [");
+  if(lightOn){
+    digitalWrite(LED_BUILTIN, LOW);
+    lightOn = false;
+  }else{
+    digitalWrite(LED_BUILTIN, HIGH);
+    lightOn = true;
+  }
+  
   if (saberOn) {
-    checkMovement();
     checkAudio(false);
     checkLights();
+    mp3.check();
   }
-  mp3.check();
+  
+  checkMovement();
   checkForButtonPush();
+  Serial.println("]\nLoop Ended");
 }
