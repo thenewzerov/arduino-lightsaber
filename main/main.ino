@@ -12,6 +12,28 @@
 
 #define USE_SOFTWARESERIAL 1
 
+//Switch
+#define BUTTON_PIN 3
+
+//Accelerometer
+#define BAUD_RATE 9600
+#define SWING_THRESHOLD 9000
+#define CLASH_THRESHOLD 11000
+#define CLASH_LOOP_COUNT 3
+#define MAX_ZEROS_LIMIT 10
+
+//Audio
+#define ARDUINO_RX 7//should connect to TX of the Serial MP3 Player module
+#define ARDUINO_TX 5//connect to RX of the module
+#define TRACK_DELAY 3
+#define AUDIO_PLAYING_LIMIT 50
+#define TIME_BETWEEN_SWINGS 50
+
+//Light
+#define LIGHT_PIN 11
+#define NUM_LIGHTS 7
+
+
 //Control
 bool saberOn = false;
 bool lightOn = true;
@@ -21,18 +43,10 @@ MPU6050 accelgyro;
 int16_t ax, ay, az;
 int16_t gx, gy, gz;
 int xOld, yOld, zOld; 
-const int SWING_THRESHOLD = 9000;
-const int CLASH_THRESHOLD = 11000;
-const int CLASH_LOOP_COUNT = 3;
 int clashLoopCount = 0;
 int zerosCount = 0;
-int maxZerosLimit = 10;
-int baseline = 0;
-#define BAUD_RATE 9600
 
 //Lights
-#define LIGHT_PIN 11
-#define NUM_LIGHTS 7
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LIGHTS, LIGHT_PIN, NEO_GRB + NEO_KHZ800);
 uint32_t black = strip.Color(0, 0, 0);
 uint32_t blue = strip.Color(50, 50, 200);
@@ -54,23 +68,16 @@ uint8_t  TRACK_SABER_CLASH_B = 7;
 uint8_t  TRACK_SABER_OFF = 8;
 uint8_t  EQUALIZER_MODE = 5;
 uint8_t  VOLUME = 30;
-#define ARDUINO_RX 7//should connect to TX of the Serial MP3 Player module
-#define ARDUINO_TX 5//connect to RX of the module
 MD_YX5300 mp3(ARDUINO_RX, ARDUINO_TX);
 boolean audioPlaying = false;
 uint8_t trackQueue = 0;
-int trackDelay = 3;
 int lastPlayedCount = 0;
 boolean mandatoryTrackPlaying = false;
 int audioPlayingCount = 0;
-int audioPlayingLimit = 50;
-int timeBetweenSwings = 50;
 int lastSwingTime = 0;
 int maxDifference = 0;
-boolean lastSoundSwing = false;
 
 //Buttons
-const int  buttonPin = 3;
 int buttonState = 0;         // current state of the button
 int lastButtonState = 0;     // previous state of the button
 
@@ -148,7 +155,7 @@ void cbResponse(const MD_YX5300::cbData *status)
   if (status->code != MD_YX5300::STS_ACK_OK)
   {
     lastPlayedCount++;
-    if (lastPlayedCount >= trackDelay || status->code == MD_YX5300::STS_FILE_END) {
+    if (lastPlayedCount >= TRACK_DELAY || status->code == MD_YX5300::STS_FILE_END) {
       lastPlayedCount = 0;
       audioPlaying = false;
       mandatoryTrackPlaying = false;
@@ -162,7 +169,7 @@ void checkAudio(boolean override) {
   audioPlayingCount++;
 
   //If this is over, we can start a new track
-  if(audioPlayingCount > audioPlayingLimit){
+  if(audioPlayingCount > AUDIO_PLAYING_LIMIT){
     mandatoryTrackPlaying = false;
   }
 
@@ -229,7 +236,7 @@ void checkMovement()
    Serial.println(abs(abs(az) - zOld));
    
 
-  if(zerosCount < maxZerosLimit){
+  if(zerosCount < MAX_ZEROS_LIMIT){
     accelgyro.initialize();
   }
 
@@ -251,7 +258,7 @@ void checkMovement()
       clashLoopCount = 0;
     }
 
-    if(lastSwingTime > timeBetweenSwings || lastSwingTime ==
+    if(lastSwingTime > TIME_BETWEEN_SWINGS || lastSwingTime ==
     0){
       if ( abs(abs(ax) - xOld) > SWING_THRESHOLD ||  abs(abs(ay) - yOld) > SWING_THRESHOLD || abs(abs(az) - zOld) > SWING_THRESHOLD )
       {
@@ -287,7 +294,7 @@ void checkMovement()
 void checkForButtonPush() {
   Serial.println("\n   Checking Button State");
   
-  buttonState  = digitalRead(buttonPin);
+  buttonState  = digitalRead(BUTTON_PIN);
 
   // compare the buttonState to its previous state
   if (buttonState != lastButtonState) {
@@ -389,8 +396,8 @@ void setup()
   initializeLights();
 
   //Get the On/Off button ready
-  pinMode(buttonPin, INPUT);
-  digitalRead(buttonPin);
+  pinMode(BUTTON_PIN, INPUT);
+  digitalRead(BUTTON_PIN);
   //Setup the audio
   initializeAudio();
 }
